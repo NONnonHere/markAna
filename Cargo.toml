@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/fyers",
+    "crates/store",
+    "crates/indicators",
+    "crates/strategy",
+    "crates/backtest",
+    "crates/report",
+]
