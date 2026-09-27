@@ -9,4 +9,3 @@ pub struct Candle {
     pub close: f64,
     pub volume: i64,
 }
-

@@ -1,0 +1,8 @@
+[scanner]
+universe_file = "config/universe.csv"
+default_timeframe = "1D"
+max_concurrent_requests = 10
+
+[backtest]
+initial_capital = 100000.0
+commission_rate = 0.0005
