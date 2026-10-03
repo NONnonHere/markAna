@@ -29,8 +29,11 @@ enum Commands {
         strategy: String,
     },
     Backtest {
-        #[arg(short, long)]
-        config: String,
+        #[arg(short, long, default_value = "NSE:RELIANCE-EQ")]
+        ticker: String,
+
+        #[arg(short, long = "strategy", default_value = "safe_dip")]
+        strategy_name: String,
     },
     Test {
         #[arg(short, long)]
@@ -139,8 +142,35 @@ async fn main() -> Result<()> {
             }
             println!("\nScan complete\n");
         }
-        Commands::Backtest { config: _ } => {
-            tracing::info!("Running backtest...");
+        Commands::Backtest {
+            ticker,
+            strategy_name,
+        } => {
+            tracing::info!("Starting backtest for {} using {}", ticker, strategy_name);
+
+            let db_url = std::env::var("DATABASE_URL").expect("Missing DATABASE_URL");
+            let pool = store::schema::init_db(&db_url).await?;
+
+            let candles = store::candles::fetch_candles(&pool, ticker).await?;
+            if candles.is_empty() {
+                tracing::error!("No data found for {}. Run ingest first.", ticker);
+                return Ok(());
+            }
+
+            let active_strategy: Box<dyn strategy::Strategy> = match strategy_name.as_str() {
+                "rsi" => Box::new(strategy::RsiReversionStrategy),
+                "safe_dip" => Box::new(strategy::TrendFilteredRsiStrategy),
+                "bollinger" => Box::new(strategy::BollingerReversionStrategy),
+                _ => {
+                    tracing::error!("Unknown strategy! Use 'rsi', 'safe_dip', or 'bollinger'.");
+                    return Ok(());
+                }
+            };
+
+            let initial_capital = 100000.0;
+            let result =
+                backtest::run_backtest(&candles, active_strategy.as_ref(), initial_capital);
+            result.print_metrics(ticker);
         }
         Commands::Test { auth_code, symbol } => {
             let app_id =

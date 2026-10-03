@@ -31,8 +31,9 @@ tracing-subscriber = { workspace = true }
 
 fyers = { path = "crates/fyers" }
 store = { path = "crates/store" }
-# strategy = { path = "crates/strategy" }
+strategy = { path = "crates/strategy" }
 indicators = { path = "crates/indicators" }
+backtest = { path = "crates/backtest" }
 
 
 [[bin]]

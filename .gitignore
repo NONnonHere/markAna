@@ -1,3 +1,4 @@
 config/.env
 target/
 Cargo.lock
+store.db
