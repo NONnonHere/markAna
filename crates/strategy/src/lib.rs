@@ -2,6 +2,7 @@ use fyers::model::Candle;
 use indicators::bb::bollinger_bands;
 use indicators::ma::sma;
 use indicators::rsi::rsi;
+use serde::{Deserialize, Serialize};
 
 pub enum Signal {
     Buy,
@@ -72,6 +73,68 @@ impl Strategy for BollingerReversionStrategy {
             Signal::Sell
         } else {
             Signal::Hold
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PredictPayload<'a> {
+    symbol: &'a str,
+    candles: &'a [Candle],
+}
+
+#[derive(Deserialize)]
+struct PredictReply {
+    signal: String,
+    predicted_return_pct: f64,
+}
+
+pub struct KronosStrategy {
+    pub endpoint: String,
+}
+
+impl Default for KronosStrategy {
+    fn default() -> Self {
+        Self {
+            endpoint: "http://127.0.0.1:8000/predict".to_string(),
+        }
+    }
+}
+
+impl Strategy for KronosStrategy {
+    fn check_signal(&self, candles: &[Candle]) -> Signal {
+        if candles.len() < 30 {
+            return Signal::Hold;
+        }
+
+        // Send the recent context window (e.g., last 200 candles) to Python
+        let window_size = 200.min(candles.len());
+        let slice = &candles[candles.len() - window_size..];
+
+        let payload = PredictPayload {
+            symbol: "NSE:STOCK",
+            candles: slice,
+        };
+
+        let response = ureq::post(&self.endpoint)
+            .send_json(&payload);
+
+        match response {
+            Ok(res) => {
+                if let Ok(reply) = res.into_json::<PredictReply>() {
+                    match reply.signal.as_str() {
+                        "Buy" => Signal::Buy,
+                        "Sell" => Signal::Sell,
+                        _ => Signal::Hold,
+                    }
+                } else {
+                    Signal::Hold
+                }
+            }
+            Err(e) => {
+                eprintln!("Kronos bridge error: {e}");
+                Signal::Hold
+            }
         }
     }
 }

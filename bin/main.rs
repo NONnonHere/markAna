@@ -52,53 +52,65 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Ingest {
-            auth_code,
-            from,
-            to,
-        } => {
-            let app_id = std::env::var("FYERS_APP_ID").expect("Missing FYERS_APP_ID");
-            let secret = std::env::var("FYERS_SECRET_KEY").expect("Missing FYERS_SECRET_KEY");
-            let db_url =
-                std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://store.db".to_string());
+        Commands::Ingest { auth_code, from, to } => {
+                    tracing::info!("Initializing Database...");
+                    let db_url = std::env::var("DATABASE_URL").expect("Missing DATABASE_URL");
+                    let pool = store::schema::init_db(&db_url).await?;
 
-            tracing::info!("Initializing Database...");
-            let pool = store::schema::init_db(&db_url).await?;
+                    tracing::info!("Authenticating with Fyers...");
+                    let app_id = std::env::var("FYERS_APP_ID").expect("Missing FYERS_APP_ID in .env");
+                    let secret_key = std::env::var("FYERS_SECRET_KEY").expect("Missing FYERS_SECRET_KEY in .env");
 
-            tracing::info!("Authenticating with Fyers...");
-            let mut client = fyers::FyersClient::new(&app_id, &secret);
-            client.generate_token(auth_code).await?;
+                    let mut client = fyers::FyersClient::new(&app_id, &secret_key);
+                    client.generate_token(&auth_code).await?;
+                    tracing::info!("Token generated successfully!");
 
-            // Read tickers from universe.csv
-            let universe = std::fs::read_to_string("config/universe.csv")
-                .unwrap_or_else(|_| "NSE:RELIANCE-EQ\nNSE:SBIN-EQ".to_string());
+                    // Calculate safe date range (< 365 days) if from/to are not passed or are invalid
+                    let today = chrono::Local::now();
+                                let range_from = (today - chrono::Duration::days(340)).format("%Y-%m-%d").to_string();
+                                let range_to = today.format("%Y-%m-%d").to_string();
 
-            let tickers: Vec<&str> = universe.lines().filter(|l| !l.is_empty()).collect();
+                    // Read tickers from universe.csv
+                    let csv_data = std::fs::read_to_string("universe.csv")
+                        .expect("Could not read universe.csv. Make sure it exists in the project root!");
 
-            tracing::info!("Starting ingestion for {} tickers...", tickers.len());
-
-            for ticker in tickers {
-                tracing::info!("Fetching {}...", ticker);
-
-                match client
-                    .get_history(ticker, "1D", from.as_str(), to.as_str())
-                    .await
-                {
-                    Ok(candles) => {
-                        let count = candles.len();
-                        store::candles::insert_candles(&pool, ticker, &candles).await?;
-                        tracing::info!("Saved {} candles for {}", count, ticker);
+                    let mut tickers = Vec::new();
+                    for line in csv_data.lines().skip(1) {
+                        let sym = line.split(',').next().unwrap_or("").trim();
+                        if !sym.is_empty() {
+                            tickers.push(sym.to_string());
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to fetch {}: {}", ticker, e);
+
+                    tracing::info!(
+                        "Starting ingestion for {} tickers (from {} to {})...",
+                        tickers.len(),
+                        range_from,
+                        range_to
+                    );
+
+                    for ticker in tickers {
+                        tracing::info!("Fetching {}...", ticker);
+
+                        match client.get_history(&ticker, "D", &range_from, &range_to).await {
+                            Ok(candles) => {
+                                if !candles.is_empty() {
+                                    store::candles::insert_candles(&pool, &ticker, &candles).await?;
+                                    tracing::info!("Saved {} candles for {}", candles.len(), ticker);
+                                } else {
+                                    tracing::warn!("No candles returned for {}", ticker);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to fetch {}: {}", ticker, e);
+                            }
+                        }
+
+                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                     }
+
+                    tracing::info!("Batch ingestion complete!");
                 }
-
-                sleep(Duration::from_millis(500)).await;
-            }
-            tracing::info!("Ingestion complete");
-        }
-
         Commands::Scan { strategy } => {
             tracing::info!("Running scanner with strategy: {}", strategy);
 
@@ -142,36 +154,52 @@ async fn main() -> Result<()> {
             }
             println!("\nScan complete\n");
         }
-        Commands::Backtest {
-            ticker,
-            strategy_name,
-        } => {
-            tracing::info!("Starting backtest for {} using {}", ticker, strategy_name);
+        Commands::Backtest { ticker, strategy_name } => {
+                    let db_url = std::env::var("DATABASE_URL").expect("Missing DATABASE_URL");
+                    let pool = store::schema::init_db(&db_url).await?;
 
-            let db_url = std::env::var("DATABASE_URL").expect("Missing DATABASE_URL");
-            let pool = store::schema::init_db(&db_url).await?;
+                    // 1. Determine which stocks to run
+                    let mut tickers_to_run = Vec::new();
+                    if ticker == "ALL" {
+                        tracing::info!("Batch mode activated. Reading universe.csv...");
+                        let csv_data = std::fs::read_to_string("universe.csv").expect("Could not read universe.csv");
+                        for line in csv_data.lines().skip(1) { // Skip header row
+                            let symbol = line.split(',').next().unwrap_or("").trim();
+                            if !symbol.is_empty() {
+                                tickers_to_run.push(symbol.to_string());
+                            }
+                        }
+                    } else {
+                        tickers_to_run.push(ticker.clone());
+                    }
 
-            let candles = store::candles::fetch_candles(&pool, ticker).await?;
-            if candles.is_empty() {
-                tracing::error!("No data found for {}. Run ingest first.", ticker);
-                return Ok(());
-            }
+                    // 2. Initialize the Strategy once
+                    let active_strategy: Box<dyn strategy::Strategy> = match strategy_name.as_str() {
+                        "rsi" => Box::new(strategy::RsiReversionStrategy),
+                        "safe_dip" => Box::new(strategy::TrendFilteredRsiStrategy),
+                        "bollinger" => Box::new(strategy::BollingerReversionStrategy),
+                        "kronos" => Box::new(strategy::KronosStrategy::default()),
+                        _ => {
+                            tracing::error!("Unknown strategy! Use 'rsi', 'safe_dip', 'bollinger', or 'kronos'.");
+                            return Ok(());
+                        }
+                    };
 
-            let active_strategy: Box<dyn strategy::Strategy> = match strategy_name.as_str() {
-                "rsi" => Box::new(strategy::RsiReversionStrategy),
-                "safe_dip" => Box::new(strategy::TrendFilteredRsiStrategy),
-                "bollinger" => Box::new(strategy::BollingerReversionStrategy),
-                _ => {
-                    tracing::error!("Unknown strategy! Use 'rsi', 'safe_dip', or 'bollinger'.");
-                    return Ok(());
+                    // 3. Loop through the universe
+                    let initial_capital = 100_000.0;
+                    for t in tickers_to_run {
+                        tracing::info!("Running {} on {}", strategy_name, t);
+
+                        let candles = store::candles::fetch_candles(&pool, &t).await?;
+                        if candles.is_empty() {
+                            tracing::warn!("No data found for {}. Skipping.", t);
+                            continue;
+                        }
+
+                        let result = backtest::run_backtest(&candles, active_strategy.as_ref(), initial_capital);
+                        result.print_metrics(&t);
+                    }
                 }
-            };
-
-            let initial_capital = 100000.0;
-            let result =
-                backtest::run_backtest(&candles, active_strategy.as_ref(), initial_capital);
-            result.print_metrics(ticker);
-        }
         Commands::Test { auth_code, symbol } => {
             let app_id =
                 std::env::var("FYERS_APP_ID").expect("FYERS_APP_ID is missing from your .env file");

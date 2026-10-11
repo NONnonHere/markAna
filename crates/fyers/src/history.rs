@@ -4,6 +4,7 @@ use crate::client::FyersClient;
 use crate::model::Candle;
 use anyhow::{bail, Result};
 use serde::Deserialize;
+use chrono::{Local, Duration};
 
 #[derive(Deserialize)]
 struct HistoryResponse {
