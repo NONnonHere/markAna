@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 fyers = { path = "../fyers" }
 strategy = { path = "../strategy" }
+serde_json = "1.0"
+chrono="0.4"

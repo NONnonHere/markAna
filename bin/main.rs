@@ -18,11 +18,14 @@ enum Commands {
         #[arg(short, long)]
         auth_code: String,
 
-        #[arg(short, long, default_value = "202-01-01")]
+        #[arg(short, long, default_value = "2024-01-01")]
         from: String,
 
         #[arg(short, long, default_value = "2024-01-01")]
         to: String,
+
+        #[arg(short, long, default_value = "D")]
+        resolution: String,
     },
     Scan {
         #[arg(short, long, default_value = "default")]
@@ -34,6 +37,9 @@ enum Commands {
 
         #[arg(short, long = "strategy", default_value = "safe_dip")]
         strategy_name: String,
+
+        #[arg(long)]
+        trade_info: bool,
     },
     Test {
         #[arg(short, long)]
@@ -56,6 +62,7 @@ async fn main() -> Result<()> {
             auth_code,
             from,
             to,
+            resolution,
         } => {
             let app_id = std::env::var("FYERS_APP_ID").expect("Missing FYERS_APP_ID");
             let secret = std::env::var("FYERS_SECRET_KEY").expect("Missing FYERS_SECRET_KEY");
@@ -80,18 +87,12 @@ async fn main() -> Result<()> {
             for ticker in tickers {
                 tracing::info!("Fetching {}...", ticker);
 
-                match client
-                    .get_history(ticker, "1D", from.as_str(), to.as_str())
-                    .await
-                {
+                match client.get_history(ticker, &resolution, &from, &to).await {
                     Ok(candles) => {
-                        let count = candles.len();
                         store::candles::insert_candles(&pool, ticker, &candles).await?;
-                        tracing::info!("Saved {} candles for {}", count, ticker);
+                        tracing::info!("Saved {} candles for {}", candles.len(), ticker);
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to fetch {}: {}", ticker, e);
-                    }
+                    Err(e) => tracing::error!("Failed to fetch {}: {}", ticker, e),
                 }
 
                 sleep(Duration::from_millis(500)).await;
@@ -145,6 +146,7 @@ async fn main() -> Result<()> {
         Commands::Backtest {
             ticker,
             strategy_name,
+            trade_info,
         } => {
             tracing::info!("Starting backtest for {} using {}", ticker, strategy_name);
 
@@ -161,16 +163,36 @@ async fn main() -> Result<()> {
                 "rsi" => Box::new(strategy::RsiReversionStrategy),
                 "safe_dip" => Box::new(strategy::TrendFilteredRsiStrategy),
                 "bollinger" => Box::new(strategy::BollingerReversionStrategy),
+                "vwap" => Box::new(strategy::VwapPullbackStrategy), // Add this
+                "squeeze" => Box::new(strategy::VolatilitySqueezeStrategy),
                 _ => {
                     tracing::error!("Unknown strategy! Use 'rsi', 'safe_dip', or 'bollinger'.");
                     return Ok(());
                 }
             };
 
+            let mut clean_candles: Vec<fyers::model::Candle> = Vec::new();
+            for c in candles {
+                let ist_seconds_since_midnight = (c.date + 19800) % 86400;
+
+                if ist_seconds_since_midnight < 33300 || ist_seconds_since_midnight >= 55800 {
+                    continue;
+                }
+
+                if let Some(last) = clean_candles.last_mut() {
+                    if last.date == c.date {
+                        *last = c;
+                        continue;
+                    }
+                }
+
+                clean_candles.push(c);
+            }
+
             let initial_capital = 100000.0;
             let result =
-                backtest::run_backtest(&candles, active_strategy.as_ref(), initial_capital);
-            result.print_metrics(ticker);
+                backtest::run_backtest(&clean_candles, active_strategy.as_ref(), initial_capital);
+            result.print_metrics(&ticker, *trade_info);
         }
         Commands::Test { auth_code, symbol } => {
             let app_id =
