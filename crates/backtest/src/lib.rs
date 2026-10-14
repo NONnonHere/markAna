@@ -1,4 +1,3 @@
-use chrono::TimeZone;
 use fyers::model::Candle;
 use strategy::{Signal, Strategy};
 
@@ -10,6 +9,7 @@ pub struct Trade {
     pub exit_price: f64,
     pub pnl_percent: f64,
     pub stop_loss: f64,
+    pub kelly_fraction: f64,
 }
 
 pub struct BacktestResult {
@@ -45,13 +45,14 @@ impl BacktestResult {
                     "LOSS"
                 };
                 println!(
-                    "[{}] [{}] Trade {:02}: Entry: ₹{:.2} | Exit: ₹{:.2} | PnL: {:+.2}%",
+                    "[{}] [{}] Trade {:02}: Entry: ₹{:.2} | Exit: ₹{:.2} | PnL: {:+.2}% | Size: {:.0}%",
                     trade.trade_type,
                     status,
                     i + 1,
                     trade.entry_price,
                     trade.exit_price,
-                    trade.pnl_percent
+                    trade.pnl_percent,
+                    trade.kelly_fraction * 100.0
                 );
             }
             println!("---\n");
@@ -59,14 +60,12 @@ impl BacktestResult {
     }
 }
 
-use std::fs::File;
-use std::io::Write;
-
-pub fn generate_trade_chart(candles: &[Candle], trade: &Trade, trade_id: usize) {
+pub fn generate_trade_chart(candles: &[Candle], sma_vals: &[f64], trade: &Trade, trade_id: usize) {
     let mut chart_data = String::new();
+    let mut sma_data = String::new();
     let mut last_time = 0;
 
-    for c in candles {
+    for (i, c) in candles.iter().enumerate() {
         if c.open == 0.0 || c.high == 0.0 || c.low == 0.0 || c.close == 0.0 {
             continue;
         }
@@ -80,7 +79,18 @@ pub fn generate_trade_chart(candles: &[Candle], trade: &Trade, trade_id: usize) 
             "{{ time: {}, open: {}, high: {}, low: {}, close: {} }},\n",
             c.date, c.open, c.high, c.low, c.close
         ));
+
+        let val = sma_vals[i];
+        if !val.is_nan() && val > 0.0 {
+            sma_data.push_str(&format!("{{ time: {}, value: {} }},\n", c.date, val));
+        }
     }
+
+    let is_long = trade.trade_type == "LONG";
+    let entry_shape = if is_long { "arrowUp" } else { "arrowDown" };
+    let entry_pos = if is_long { "belowBar" } else { "aboveBar" };
+    let exit_shape = if is_long { "arrowDown" } else { "arrowUp" };
+    let exit_pos = if is_long { "aboveBar" } else { "belowBar" };
 
     let html = format!(
         r#"
@@ -100,7 +110,14 @@ pub fn generate_trade_chart(candles: &[Candle], trade: &Trade, trade_id: usize) 
                 const chart = LightweightCharts.createChart(document.getElementById('tvchart'), {{
                     layout: {{ background: {{ color: '#131722' }}, textColor: '#d1d4dc' }},
                     grid: {{ vertLines: {{ color: '#2b2b43' }}, horzLines: {{ color: '#2b2b43' }} }},
-                    timeScale: {{ timeVisible: true, secondsVisible: false }}
+                    timeScale: {{ timeVisible: true, secondsVisible: false }},
+                    localization: {{
+                        timeFormatter: timestamp => {{
+                            return new Date(timestamp * 1000).toLocaleTimeString('en-IN', {{
+                                timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false
+                            }});
+                        }}
+                    }}
                 }});
 
                 const candleSeries = chart.addCandlestickSeries();
@@ -108,44 +125,36 @@ pub fn generate_trade_chart(candles: &[Candle], trade: &Trade, trade_id: usize) 
                     {}
                 ]);
 
-                // 1. Entry Line (Blue)
-                candleSeries.createPriceLine({{
-                    price: {},
-                    color: '#2196F3',
-                    lineWidth: 2,
-                    lineStyle: 2,
-                    axisLabelVisible: true,
-                    title: 'Entry'
-                }});
+                // Macro Trend Line (200 SMA)
+                const smaSeries = chart.addLineSeries({{ color: '#ffeb3b', lineWidth: 2, title: '200 SMA' }});
+                smaSeries.setData([
+                    {}
+                ]);
 
-                // 2. Exit Line (Pink)
-                candleSeries.createPriceLine({{
-                    price: {},
-                    color: '#e91e63',
-                    lineWidth: 2,
-                    lineStyle: 2,
-                    axisLabelVisible: true,
-                    title: 'Exit'
-                }});
+                candleSeries.setMarkers([
+                    {{ time: {}, position: '{}', color: '#2196F3', shape: '{}', size: 1 }},
+                    {{ time: {}, position: '{}', color: '#e91e63', shape: '{}', size: 1 }}
+                ]);
 
-                // 3. Stop Loss Line (Orange)
-                candleSeries.createPriceLine({{
-                    price: {},
-                    color: '#ff9800',
-                    lineWidth: 2,
-                    lineStyle: 1,
-                    axisLabelVisible: true,
-                    title: 'Stop Loss'
-                }});
+                candleSeries.createPriceLine({{ price: {}, color: '#2196F3', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entry' }});
+                candleSeries.createPriceLine({{ price: {}, color: '#e91e63', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Exit' }});
+                candleSeries.createPriceLine({{ price: {}, color: '#ff9800', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: 'Stop Loss' }});
             </script>
         </body>
         </html>
         "#,
-        trade_id,          //Matches <title>
-        chart_data,        //Matches setData()
-        trade.entry_price, //Matches Entry Line
-        trade.exit_price,  //Matches Exit Line
-        trade.stop_loss    //Matches Stop Loss Line
+        trade_id,
+        chart_data,
+        sma_data,
+        trade.entry_time,
+        entry_pos,
+        entry_shape,
+        trade.exit_time,
+        exit_pos,
+        exit_shape,
+        trade.entry_price,
+        trade.exit_price,
+        trade.stop_loss
     );
 
     let filename = format!("trade_{:02}_chart.html", trade_id);
@@ -155,15 +164,19 @@ pub fn generate_trade_chart(candles: &[Candle], trade: &Trade, trade_id: usize) 
 
 pub fn run_backtest(
     candles: &[Candle],
-    strategy: &dyn Strategy,
+    strat: &dyn Strategy,
     initial_capital: f64,
 ) -> BacktestResult {
     let mut capital = initial_capital;
-    let mut position: Option<(i64, f64, f64)> = None;
+    let mut position: Option<(String, i64, f64, f64, f64, f64)> = None;
     let mut trades = Vec::new();
+    let mut current_trading_day = 0;
+    let mut trades_today = 0;
+
+    let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+    let full_sma = strategy::sma(&closes, 200);
 
     let warmup = 30;
-
     if candles.len() < warmup {
         return BacktestResult {
             initial_capital,
@@ -175,29 +188,39 @@ pub fn run_backtest(
     for i in warmup..candles.len() {
         let history_slice = &candles[0..=i];
         let current_candle = &candles[i];
-
         let ist_seconds = (current_candle.date + 19800) % 86400;
 
         if ist_seconds >= 54900 && position.is_some() {
-            let (entry_time, entry_price, qty) = position.unwrap();
+            let (trade_type, entry_time, entry_price, qty, stop_loss, kelly_pct) =
+                position.unwrap();
             let exit_time = current_candle.date;
             let exit_price = current_candle.close;
-            capital = qty * exit_price;
+
+            let pnl_percent = if trade_type == "LONG" {
+                capital += (exit_price - entry_price) * qty;
+                ((exit_price - entry_price) / entry_price) * 100.0
+            } else {
+                capital += (entry_price - exit_price) * qty;
+                ((entry_price - exit_price) / entry_price) * 100.0
+            };
 
             trades.push(Trade {
-                trade_type: "LONG".to_string(),
+                trade_type,
                 entry_time,
                 exit_time,
                 entry_price,
                 exit_price,
-                pnl_percent: ((exit_price - entry_price) / entry_price) * 100.0,
-                stop_loss: entry_price * (1.0 - 0.003),
+                pnl_percent,
+                stop_loss,
+                kelly_fraction: kelly_pct,
             });
             position = None;
 
             let context_start = if i > 100 { i - 100 } else { 0 };
+            let context_end = std::cmp::min(i + 30, candles.len() - 1);
             generate_trade_chart(
-                &candles[context_start..=i],
+                &candles[context_start..=context_end],
+                &full_sma[context_start..=context_end],
                 trades.last().unwrap(),
                 trades.len(),
             );
@@ -208,57 +231,118 @@ pub fn run_backtest(
             continue;
         }
 
-        let entry_price = position.map(|(_, price, _)| price);
-        let signal = strategy.check_signal(history_slice, entry_price);
+        let strategy_pos = position
+            .as_ref()
+            .map(|(t, _, p, _, _, _)| if t == "LONG" { *p } else { -*p });
+        let signal = strat.check_signal(history_slice, strategy_pos);
+        let mut kelly_fraction = 1.0;
 
+        if trades.len() >= 5 {
+            let wins = trades.iter().filter(|t| t.pnl_percent > 0.0).count() as f64;
+            let w = wins / trades.len() as f64;
+
+            let avg_win = trades
+                .iter()
+                .filter(|t| t.pnl_percent > 0.0)
+                .map(|t| t.pnl_percent)
+                .sum::<f64>()
+                / wins.max(1.0);
+            let losses = trades.len() as f64 - wins;
+            let avg_loss = trades
+                .iter()
+                .filter(|t| t.pnl_percent <= 0.0)
+                .map(|t| t.pnl_percent.abs())
+                .sum::<f64>()
+                / losses.max(1.0);
+
+            if avg_loss > 0.0 && avg_win > 0.0 {
+                let r = avg_win / avg_loss;
+                let kelly = w - ((1.0 - w) / r);
+
+                kelly_fraction = (kelly * 0.5).clamp(0.1, 1.0);
+            }
+        }
         match signal {
             Signal::Buy if position.is_none() => {
                 let qty = capital / current_candle.close;
                 // Save the current_candle.date
                 position = Some((current_candle.date, current_candle.close, qty));
             }
-            Signal::Sell if position.is_some() => {
-                let (entry_time, entry_price, qty) = position.unwrap();
+            Signal::Short if position.is_none() => {
+                let qty = capital / current_candle.close;
+                let atr_vals = strategy::atr(history_slice, 14);
+                let entry_atr = atr_vals.last().unwrap_or(&0.0);
+                let stop_loss = current_candle.close + (2.0 * entry_atr);
+                position = Some((
+                    "SHORT".to_string(),
+                    current_candle.date,
+                    current_candle.close,
+                    qty,
+                    stop_loss,
+                    kelly_fraction,
+                ));
+            }
+            Signal::Sell | Signal::Cover if position.is_some() => {
+                let (trade_type, entry_time, entry_price, qty, stop_loss, kelly_pct) =
+                    position.unwrap();
                 let exit_time = current_candle.date;
                 let exit_price = current_candle.close;
 
-                capital = qty * exit_price;
-                let pnl_percent = ((exit_price - entry_price) / entry_price) * 100.0;
+                let pnl_percent = if trade_type == "LONG" {
+                    capital += (exit_price - entry_price) * qty;
+                    ((exit_price - entry_price) / entry_price) * 100.0
+                } else {
+                    capital = capital + ((entry_price - exit_price) * qty);
+                    ((entry_price - exit_price) / entry_price) * 100.0
+                };
 
                 trades.push(Trade {
-                    trade_type: "LONG".to_string(),
-                    entry_time, // Add this
-                    exit_time,  // Add this
+                    trade_type,
+                    entry_time,
+                    exit_time,
                     entry_price,
                     exit_price,
                     pnl_percent,
-                    stop_loss: entry_price * (1.0 - 0.003),
+                    stop_loss,
+                    kelly_fraction: kelly_pct,
                 });
                 position = None;
 
                 let context_start = if i > 100 { i - 100 } else { 0 };
-                let chart_candles = &candles[context_start..=i];
-                generate_trade_chart(chart_candles, trades.last().unwrap(), trades.len());
+                let context_end = std::cmp::min(i + 30, candles.len() - 1);
+                generate_trade_chart(
+                    &candles[context_start..=context_end],
+                    &full_sma[context_start..=context_end],
+                    trades.last().unwrap(),
+                    trades.len(),
+                );
             }
             _ => {}
         }
     }
 
-    if let Some((entry_time, entry_price, qty)) = position {
+    if let Some((trade_type, entry_time, entry_price, qty, stop_loss, kelly_pct)) = position {
         let last_index = candles.len() - 1;
-        let last_candle = &candles[last_index];
-        let exit_price = last_candle.close;
-        let exit_time = last_candle.date;
+        let exit_price = candles[last_index].close;
+        let exit_time = candles[last_index].date;
 
-        capital = qty * exit_price;
+        let pnl_percent = if trade_type == "LONG" {
+            capital += (exit_price - entry_price) * qty;
+            ((exit_price - entry_price) / entry_price) * 100.0
+        } else {
+            capital += (entry_price - exit_price) * qty;
+            ((entry_price - exit_price) / entry_price) * 100.0
+        };
+
         trades.push(Trade {
-            trade_type: "LONG".to_string(),
+            trade_type,
             entry_time,
             exit_time,
             entry_price,
             exit_price,
-            pnl_percent: ((exit_price - entry_price) / entry_price) * 100.0,
-            stop_loss: entry_price * (1.0 - 0.003),
+            pnl_percent,
+            stop_loss,
+            kelly_fraction: kelly_pct,
         });
 
         // Generate the chart for this final force-closed trade
@@ -267,8 +351,12 @@ pub fn run_backtest(
         } else {
             0
         };
-        let chart_candles = &candles[context_start..=last_index];
-        generate_trade_chart(chart_candles, trades.last().unwrap(), trades.len());
+        generate_trade_chart(
+            &candles[context_start..=last_index],
+            &full_sma[context_start..=last_index],
+            trades.last().unwrap(),
+            trades.len(),
+        );
     }
 
     BacktestResult {
