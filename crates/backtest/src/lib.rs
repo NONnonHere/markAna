@@ -170,8 +170,6 @@ pub fn run_backtest(
     let mut capital = initial_capital;
     let mut position: Option<(String, i64, f64, f64, f64, f64)> = None;
     let mut trades = Vec::new();
-    let mut current_trading_day = 0;
-    let mut trades_today = 0;
 
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
     let full_sma = strategy::sma(&closes, 200);
@@ -235,20 +233,22 @@ pub fn run_backtest(
             .as_ref()
             .map(|(t, _, p, _, _, _)| if t == "LONG" { *p } else { -*p });
         let signal = strat.check_signal(history_slice, strategy_pos);
-        let mut kelly_fraction = 1.0;
+        let mut kelly_fraction = 0.25;
 
         if trades.len() >= 5 {
-            let wins = trades.iter().filter(|t| t.pnl_percent > 0.0).count() as f64;
-            let w = wins / trades.len() as f64;
+            let window: Vec<&Trade> = trades.iter().rev().take(20).collect();
+            let count = window.len() as f64;
+            let wins = window.iter().filter(|t| t.pnl_percent > 0.0).count() as f64;
+            let w = wins / count;
 
-            let avg_win = trades
+            let avg_win = window
                 .iter()
                 .filter(|t| t.pnl_percent > 0.0)
                 .map(|t| t.pnl_percent)
                 .sum::<f64>()
                 / wins.max(1.0);
-            let losses = trades.len() as f64 - wins;
-            let avg_loss = trades
+            let losses = count - wins;
+            let avg_loss = window
                 .iter()
                 .filter(|t| t.pnl_percent <= 0.0)
                 .map(|t| t.pnl_percent.abs())
@@ -259,14 +259,23 @@ pub fn run_backtest(
                 let r = avg_win / avg_loss;
                 let kelly = w - ((1.0 - w) / r);
 
-                kelly_fraction = (kelly * 0.5).clamp(0.1, 1.0);
+                kelly_fraction = (kelly * 0.5).clamp(0.2, 1.0);
             }
         }
         match signal {
             Signal::Buy if position.is_none() => {
                 let qty = capital / current_candle.close;
-                // Save the current_candle.date
-                position = Some((current_candle.date, current_candle.close, qty));
+                let atr_vals = strategy::atr(history_slice, 14);
+                let entry_atr = atr_vals.last().unwrap_or(&0.0);
+                let stop_loss = current_candle.close - (2.0 * entry_atr);
+                position = Some((
+                    "LONG".to_string(),
+                    current_candle.date,
+                    current_candle.close,
+                    qty,
+                    stop_loss,
+                    kelly_fraction,
+                ));
             }
             Signal::Short if position.is_none() => {
                 let qty = capital / current_candle.close;
@@ -292,7 +301,7 @@ pub fn run_backtest(
                     capital += (exit_price - entry_price) * qty;
                     ((exit_price - entry_price) / entry_price) * 100.0
                 } else {
-                    capital = capital + ((entry_price - exit_price) * qty);
+                    capital += (entry_price - exit_price) * qty;
                     ((entry_price - exit_price) / entry_price) * 100.0
                 };
 

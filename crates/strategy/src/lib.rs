@@ -53,12 +53,11 @@ impl Strategy for TrendFilteredRsiStrategy {
         }
     }
 }
-pub struct BollingerReversionStrategy;
 
+pub struct BollingerReversionStrategy;
 impl Strategy for BollingerReversionStrategy {
     fn check_signal(&self, candles: &[Candle], _position: Option<f64>) -> Signal {
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-
         let bands = bollinger_bands(&closes, 20, 2.0);
 
         let current_close = closes.last().unwrap_or(&0.0);
@@ -80,7 +79,6 @@ impl Strategy for BollingerReversionStrategy {
 }
 
 pub struct VwapPullbackStrategy;
-
 impl Strategy for VwapPullbackStrategy {
     fn check_signal(&self, candles: &[Candle], _position: Option<f64>) -> Signal {
         let vwap_vals = session_vwap(candles);
@@ -116,14 +114,10 @@ impl Strategy for VolatilitySqueezeStrategy {
         let atr_vals = atr(candles, 14);
         let adx_vals = adx(candles, 14);
 
-        // Fetch RSI using your crate's existing function
-        let rsi_vals = rsi(&closes, 14);
-
         let bb_upper = bb.upper.last().unwrap_or(&0.0);
         let bb_lower = bb.lower.last().unwrap_or(&0.0);
         let kc_upper = kc.upper.last().unwrap_or(&0.0);
         let kc_lower = kc.lower.last().unwrap_or(&0.0);
-
         let current_close = closes.last().unwrap_or(&0.0);
         let current_trend = macro_trend.last().unwrap_or(&0.0);
         let current_atr = atr_vals.last().unwrap_or(&0.0);
@@ -160,21 +154,13 @@ impl Strategy for VolatilitySqueezeStrategy {
 
         let is_squeezed = bb_upper < kc_upper && bb_lower > kc_lower;
 
-        let bb_upper_prev = bb.upper.iter().rev().nth(1).unwrap_or(&0.0);
-        let bb_lower_prev = bb.lower.iter().rev().nth(1).unwrap_or(&0.0);
-        let kc_upper_prev = kc.upper.iter().rev().nth(1).unwrap_or(&0.0);
-        let kc_lower_prev = kc.lower.iter().rev().nth(1).unwrap_or(&0.0);
-
-        let was_squeezed_recently = bb_upper_prev < kc_upper_prev && bb_lower_prev > kc_lower_prev;
-
-        if !is_squeezed && was_squeezed_recently && *current_adx > 20.0 {
+        if !is_squeezed && *current_adx > 20.0 {
             if current_close > bb_upper && current_close > current_trend {
                 return Signal::Buy;
             } else if current_close < bb_lower && current_close < current_trend {
                 return Signal::Short;
             }
         }
-
         Signal::Hold
     }
 }
@@ -295,10 +281,12 @@ pub fn sma(prices: &[f64], period: usize) -> Vec<f64> {
     }
 
     let mut sum: f64 = prices[0..period].iter().sum();
+
     sma_vals[period - 1] = sum / period as f64;
 
     for i in period..prices.len() {
         sum += prices[i] - prices[i - period];
+
         sma_vals[i] = sum / period as f64;
     }
 
